@@ -61,6 +61,15 @@ Full documentation: <https://DiamondLightSource.github.io/smartem-devtools>
 ### SmartEM
 - [smartem-decisions](https://github.com/DiamondLightSource/smartem-decisions) - Source system for metadata
 
+## Development
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+This enables local hooks for secrets scanning and code quality checks.
+
 ## Contributing
 
 Contributions are welcome. This is an open-source project maintained by Diamond Light Source for the Fragment Screen community.
