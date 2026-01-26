@@ -1,5 +1,5 @@
 fandanGO-core
 fandanGO-aria
 python-dotenv>=1.0.1
-requests>=2.31.0
+requests>=2.32.4
 tabulate>=0.9.0
