@@ -91,6 +91,6 @@ def perform_action(args):
     Returns:
         dict: Results dictionary with success status and info
     """
-    success, info = generate_metadata_from_smartem(args['name'], args['acquisition-id'])
+    success, info = generate_metadata_from_smartem(args['name'], args['acquisition_id'])
     results = {'success': success, 'info': info}
     return results

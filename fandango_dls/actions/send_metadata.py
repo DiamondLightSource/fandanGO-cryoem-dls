@@ -10,8 +10,7 @@ from fandango_dls.db.sqlite_db import get_project_metadata, get_project_data_loc
 
 # Import ARIA client from fandanGO-aria
 try:
-    from aria.client import AriaClient
-    from aria.data_manager import Bucket, Field
+    from fGOaria import AriaClient, Bucket, Field
 except ImportError:
     AriaClient = None
     print("Warning: fandanGO-aria not available. Install to enable ARIA integration.")
@@ -110,6 +109,6 @@ def perform_action(args):
     Returns:
         dict: Results dictionary with success status and info
     """
-    success, info = send_metadata_to_aria(args['name'], args['visit-id'])
+    success, info = send_metadata_to_aria(args['name'], args['visit_id'])
     results = {'success': success, 'info': info}
     return results

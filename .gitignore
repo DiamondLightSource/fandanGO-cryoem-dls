@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local config (use config.yaml.template)
+config.yaml
+
+# IDE
+.vscode/
+.idea/
