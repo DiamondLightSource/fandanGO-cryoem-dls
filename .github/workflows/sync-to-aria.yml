@@ -1,0 +1,280 @@
+# Sync facility connector to ARIA fork
+# See: smartem-devtools/docs/decision-records/decisions/0015-facility-connector-fork-sync.md
+#
+# This workflow syncs changes from the facility-owned repo to the ARIA fork.
+# Three modes are supported (configured in .github/fandango-sync.yml):
+#   - direct-push: Push commits directly to fork (requires deploy key)
+#   - per-commit-pr: Create a PR for each push
+#   - buffered-pr: Aggregate commits and create a single PR periodically
+
+name: Sync to ARIA Fork
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    # Run daily at 06:00 UTC for buffered-pr mode
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: 'Force sync even if already in sync'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  read-config:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.config.outputs.enabled }}
+      mode: ${{ steps.config.outputs.mode }}
+      target_org: ${{ steps.config.outputs.target_org }}
+      target_repo: ${{ steps.config.outputs.target_repo }}
+      buffer_hours: ${{ steps.config.outputs.buffer_hours }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read sync configuration
+        id: config
+        run: |
+          CONFIG_FILE=".github/fandango-sync.yml"
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No sync configuration found at $CONFIG_FILE"
+            exit 0
+          fi
+
+          # Parse YAML config using yq
+          ENABLED=$(yq -r '.sync.enabled // true' "$CONFIG_FILE")
+          MODE=$(yq -r '.sync.mode // "direct-push"' "$CONFIG_FILE")
+          TARGET_ORG=$(yq -r '.sync.target.org // ""' "$CONFIG_FILE")
+          TARGET_REPO=$(yq -r '.sync.target.repo // ""' "$CONFIG_FILE")
+          BUFFER_HOURS=$(yq -r '.sync.buffer_hours // 24' "$CONFIG_FILE")
+
+          echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "target_org=$TARGET_ORG" >> "$GITHUB_OUTPUT"
+          echo "target_repo=$TARGET_REPO" >> "$GITHUB_OUTPUT"
+          echo "buffer_hours=$BUFFER_HOURS" >> "$GITHUB_OUTPUT"
+
+          echo "Configuration loaded:"
+          echo "  enabled: $ENABLED"
+          echo "  mode: $MODE"
+          echo "  target: $TARGET_ORG/$TARGET_REPO"
+          echo "  buffer_hours: $BUFFER_HOURS"
+
+  direct-push:
+    needs: read-config
+    if: |
+      needs.read-config.outputs.enabled == 'true' &&
+      needs.read-config.outputs.mode == 'direct-push' &&
+      github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ARIA_FORK_DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Push to ARIA fork
+        env:
+          TARGET_ORG: ${{ needs.read-config.outputs.target_org }}
+          TARGET_REPO: ${{ needs.read-config.outputs.target_repo }}
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes
+        run: |
+          FORK_URL="git@github.com:${TARGET_ORG}/${TARGET_REPO}.git"
+
+          # Add ARIA fork as remote
+          git remote add aria "$FORK_URL"
+
+          # Check if we're already in sync
+          git fetch aria main || {
+            echo "::warning::Could not fetch from ARIA fork. It may not exist yet."
+            exit 0
+          }
+
+          LOCAL_SHA=$(git rev-parse HEAD)
+          REMOTE_SHA=$(git rev-parse aria/main 2>/dev/null || echo "")
+
+          if [ "$LOCAL_SHA" = "$REMOTE_SHA" ] && [ "${{ inputs.force_sync }}" != "true" ]; then
+            echo "Already in sync (both at $LOCAL_SHA)"
+            exit 0
+          fi
+
+          # Push to fork
+          echo "Pushing $LOCAL_SHA to $FORK_URL"
+          git push aria HEAD:main || {
+            echo "::warning::Push failed. This may be a permissions issue or the fork is ahead."
+            exit 0
+          }
+
+          echo "Successfully synced to ARIA fork"
+
+  per-commit-pr:
+    needs: read-config
+    if: |
+      needs.read-config.outputs.enabled == 'true' &&
+      needs.read-config.outputs.mode == 'per-commit-pr' &&
+      github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create PR to ARIA fork
+        env:
+          GH_TOKEN: ${{ secrets.ARIA_FORK_PAT }}
+          TARGET_ORG: ${{ needs.read-config.outputs.target_org }}
+          TARGET_REPO: ${{ needs.read-config.outputs.target_repo }}
+        run: |
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+          BRANCH_NAME="sync/upstream-${COMMIT_SHA}"
+
+          # Check if PR already exists for this commit
+          EXISTING_PR=$(gh pr list \
+            --repo "${TARGET_ORG}/${TARGET_REPO}" \
+            --search "sync/upstream-${COMMIT_SHA}" \
+            --json number \
+            --jq '.[0].number // empty' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR #$EXISTING_PR already exists for this commit"
+            exit 0
+          fi
+
+          # Create PR body
+          PR_BODY=$(cat <<EOF
+          ## Upstream Sync
+
+          This PR syncs changes from the upstream facility repository.
+
+          **Source**: ${{ github.repository }}@${COMMIT_SHA}
+          **Commit**: ${COMMIT_MSG}
+
+          ---
+          *Automated by [sync-to-aria workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          EOF
+          )
+
+          # Create the PR using the GitHub API
+          # Note: This requires the fork to allow PRs from upstream
+          gh pr create \
+            --repo "${TARGET_ORG}/${TARGET_REPO}" \
+            --title "sync: ${COMMIT_MSG}" \
+            --body "$PR_BODY" \
+            --head "${{ github.repository_owner }}:main" \
+            --base main || {
+              echo "::warning::Could not create PR. The fork may not allow PRs from upstream."
+              exit 0
+            }
+
+          echo "Successfully created PR to ARIA fork"
+
+  buffered-pr:
+    needs: read-config
+    if: |
+      needs.read-config.outputs.enabled == 'true' &&
+      needs.read-config.outputs.mode == 'buffered-pr' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for changes and create buffered PR
+        env:
+          GH_TOKEN: ${{ secrets.ARIA_FORK_PAT }}
+          TARGET_ORG: ${{ needs.read-config.outputs.target_org }}
+          TARGET_REPO: ${{ needs.read-config.outputs.target_repo }}
+          BUFFER_HOURS: ${{ needs.read-config.outputs.buffer_hours }}
+        run: |
+          # Fetch the fork's main branch to compare
+          git remote add aria "https://github.com/${TARGET_ORG}/${TARGET_REPO}.git"
+          git fetch aria main || {
+            echo "::warning::Could not fetch from ARIA fork. It may not exist yet."
+            exit 0
+          }
+
+          LOCAL_SHA=$(git rev-parse HEAD)
+          REMOTE_SHA=$(git rev-parse aria/main 2>/dev/null || echo "")
+
+          if [ "$LOCAL_SHA" = "$REMOTE_SHA" ] && [ "${{ inputs.force_sync }}" != "true" ]; then
+            echo "Already in sync (both at $LOCAL_SHA)"
+            exit 0
+          fi
+
+          # Check for existing open PR
+          EXISTING_PR=$(gh pr list \
+            --repo "${TARGET_ORG}/${TARGET_REPO}" \
+            --search "sync: Buffered upstream changes" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Buffered PR #$EXISTING_PR already exists and is open"
+            exit 0
+          fi
+
+          # Get commit log since last sync
+          COMMITS=$(git log --oneline aria/main..HEAD 2>/dev/null || git log --oneline -20)
+          COMMIT_COUNT=$(echo "$COMMITS" | wc -l)
+          DATE=$(date -u +"%Y-%m-%d")
+
+          # Create PR body
+          PR_BODY=$(cat <<EOF
+          ## Buffered Upstream Sync
+
+          This PR syncs accumulated changes from the upstream facility repository.
+
+          **Source**: ${{ github.repository }}
+          **Date**: ${DATE}
+          **Commits**: ${COMMIT_COUNT}
+
+          ### Changes
+
+          \`\`\`
+          ${COMMITS}
+          \`\`\`
+
+          ---
+          *Automated by [sync-to-aria workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          EOF
+          )
+
+          # Create the PR
+          gh pr create \
+            --repo "${TARGET_ORG}/${TARGET_REPO}" \
+            --title "sync: Buffered upstream changes (${DATE})" \
+            --body "$PR_BODY" \
+            --head "${{ github.repository_owner }}:main" \
+            --base main || {
+              echo "::warning::Could not create PR. The fork may not allow PRs from upstream."
+              exit 0
+            }
+
+          echo "Successfully created buffered PR to ARIA fork"
+
+  notify-failure:
+    needs: [read-config, direct-push, per-commit-pr, buffered-pr]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log sync failure
+        run: |
+          echo "::warning::ARIA fork sync failed. Check the workflow logs for details."
+          echo "This is a warning, not an error - the build continues."

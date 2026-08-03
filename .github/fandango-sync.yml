@@ -1,0 +1,38 @@
+# FandanGO Connector Sync Configuration
+# See: smartem-devtools/docs/decision-records/decisions/0015-facility-connector-fork-sync.md
+#
+# This file configures how changes from this facility-owned connector
+# are synced to the ARIA (FragmentScreen) fork for ecosystem visibility.
+
+sync:
+  # Enable or disable sync entirely
+  enabled: true
+
+  # Target fork repository
+  target:
+    org: FragmentScreen
+    repo: fandanGO-cryoem-dls
+
+  # Sync mode - choose one:
+  #   direct-push:   Push commits directly to fork (requires deploy key with write access)
+  #   per-commit-pr: Create a PR for each push (requires PAT with PR creation permissions)
+  #   buffered-pr:   Aggregate commits and create a single PR periodically (requires PAT)
+  mode: direct-push
+
+  # Branches to sync (currently only main is supported)
+  branches:
+    - main
+
+  # Buffer duration in hours for buffered-pr mode
+  # Ignored for other modes
+  buffer_hours: 24
+
+# Required secrets (configure in repository settings):
+#
+# For direct-push mode:
+#   ARIA_FORK_DEPLOY_KEY: SSH private key with write access to the fork
+#                         (ARIA adds the public key as a deploy key to their fork)
+#
+# For per-commit-pr or buffered-pr modes:
+#   ARIA_FORK_PAT: Personal access token with repo scope
+#                  (or fine-grained token with Contents and Pull Requests permissions)
